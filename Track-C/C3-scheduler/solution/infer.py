@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--onnx", required=True, help="Path to ONNX model")
     parser.add_argument("--input", required=True, help="Input directory")
     parser.add_argument("--output", required=True, help="Output directory")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size")
     parser.add_argument("--cpu", action="store_true",
                         help="Force CPU execution (for precision-sensitive deep models)")
     args = parser.parse_args()
