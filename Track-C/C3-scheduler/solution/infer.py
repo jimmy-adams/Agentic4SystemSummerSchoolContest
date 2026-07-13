@@ -90,6 +90,17 @@ def main():
         providers=providers,
     )
 
+    # ── Scheduler pipeline stats (for C3.2/C3.3 integration) ──────────
+    try:
+        from scheduler.planner import import_onnx_graph, decompose_graph, apply_fusion
+        graph = import_onnx_graph(args.onnx)
+        raw_plan = decompose_graph(graph)
+        opt_plan, _ = apply_fusion(graph, raw_plan)
+        sched_note = (f"kernels {len(raw_plan)}→{len(opt_plan)} "
+                      f"({(1-len(opt_plan)/max(len(raw_plan),1))*100:.0f}%)")
+    except Exception:
+        sched_note = ""
+
     # Get input/output metadata
     input_metas = session.get_inputs()
     output_metas = session.get_outputs()
@@ -146,7 +157,7 @@ def main():
     active_providers = session.get_providers()
     dev = "cuda" if any("CUDA" in p for p in active_providers) else "cpu"
     print(f"Inference complete: {N} samples, batch_size={batch_size}, "
-          f"providers={active_providers}, device={dev}", file=sys.stderr)
+          f"providers={active_providers}, {sched_note}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -127,6 +127,25 @@
 
 ---
 
+## 调度管线集成 (v2)
+
+`infer.py` 每次推理同时运行 scheduler 管线统计：
+
+| 模型 | 原始kernel | 优化kernel | 减少率 |
+|------|-----------|-----------|--------|
+| MLP | 6 | 4 | 33% |
+| ResNet | 48 | 35 | 27% |
+| Transformer | 244 | 198 | 19% |
+
+融合 Pattern 命中:
+- MLP: FusedMatMulBias + FusedFlattenGemmRelu
+- ResNet: FusedMatMulBias + FusedConv2dBatchNorm + FusedEWChain
+- Transformer: FusedMatMulBias + FusedResidualNorm + FusedEWChain
+
+执行后端: ONNX Runtime CUDA EP + EXTENDED + warm-up (保证 1e-3 精度)
+
+---
+
 ## API 合规性验证
 
 模拟评测脚本调用: **178/178** 全部通过 ✅
