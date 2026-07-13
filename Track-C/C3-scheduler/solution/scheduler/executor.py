@@ -57,6 +57,62 @@ class GPUExecutor:
             self._run(k)
         return {n: self._reg[n].cpu().numpy() for n in output_names}
 
+    def _merge_kernels(self, plan: List[dict]) -> List[dict]:
+        """Merge known kernel sequences: ConvRelu, Softmax(5→1), LN(8→1), GELU(4→1)."""
+        merged = []
+        i = 0
+        while i < len(plan):
+            k = plan[i]
+            ki = k['name']
+
+            # Softmax: reduce_max → sub → exp → reduce_sum → div
+            if (i + 4 < len(plan) and plan[i]['name'].startswith('reduce_max_')
+                    and plan[i+1]['name'].startswith('sub_')
+                    and plan[i+2]['name'].startswith('exp_')
+                    and plan[i+3]['name'].startswith('reduce_sum_')
+                    and plan[i+4]['name'].startswith('div_')):
+                merged.append({
+                    'name': 'softmax_fused',
+                    'inputs': plan[i]['inputs'],
+                    'outputs': plan[i+4]['outputs'],
+                    'op_type': 'Softmax',
+                })
+                i += 5
+                continue
+
+            # LayerNorm: reduce_mean → sub → mul → reduce_mean → add → sqrt → div → mul
+            if (i + 7 < len(plan) and plan[i]['name'].startswith('reduce_mean_')
+                    and plan[i+1]['name'].startswith('sub_')
+                    and plan[i+2]['name'].startswith('mul_')
+                    and plan[i+3]['name'].startswith('reduce_mean_')
+                    and plan[i+7]['name'].startswith('mul_')):
+                merged.append({
+                    'name': 'layer_norm_fused',
+                    'inputs': plan[i]['inputs'],
+                    'outputs': plan[i+7]['outputs'],
+                    'op_type': 'LayerNormalization',
+                })
+                i += 8
+                continue
+
+            # GELU: div → erf → add → mul
+            if (i + 3 < len(plan) and plan[i]['name'].startswith('div_')
+                    and plan[i+1]['name'].startswith('erf_')
+                    and plan[i+2]['name'].startswith('add_')
+                    and plan[i+3]['name'].startswith('mul_')):
+                merged.append({
+                    'name': 'gelu_fused',
+                    'inputs': plan[i]['inputs'],
+                    'outputs': plan[i+3]['outputs'],
+                    'op_type': 'Gelu',
+                })
+                i += 4
+                continue
+
+            merged.append(plan[i])
+            i += 1
+        return merged
+
     def _get(self, name):
         if name not in self._reg:
             # LayerNorm epsilon fallback
@@ -199,7 +255,21 @@ class GPUExecutor:
                 p = (pads[0], pads[1])
             self._set(out[0], F.conv2d(x, w, b, stride=tuple(stride), padding=p))
 
-        # ── Fused ops (from C3.3 fusion) ──────────────────────────────
+        # ── Kernel-level fused ops ────────────────────────────────────
+        elif name == "softmax_fused":
+            x = g(inp[0])
+            self._set(out[0], F.softmax(x.float(), dim=-1).to(x.dtype))
+
+        elif name == "layer_norm_fused":
+            x = g(inp[0])
+            scale = g(inp[1]) if len(inp) >= 2 else None
+            bias = g(inp[2]) if len(inp) >= 3 else None
+            self._set(out[0], F.layer_norm(x.float(), [x.shape[-1]],
+                                            weight=scale, bias=bias).to(x.dtype))
+
+        elif name == "gelu_fused":
+            x = g(inp[0])
+            self._set(out[0], F.gelu(x.float()).to(x.dtype))
         elif name == "FusedFlattenGemmRelu":
             # inputs: [X, weight, bias?]
             x = g(inp[0])
@@ -244,7 +314,14 @@ class GPUExecutor:
                     pass
             self._set(out[0], x)
 
-        elif name == "FusedConv2dBatchNorm":
+        elif name == "FusedConvRelu":
+            x, w = g(inp[0]), g(inp[1])
+            b = g(inp[2]) if len(inp) >= 3 else None
+            attrs = self._node_attrs.get(out[0], {})
+            stride = tuple(attrs.get("strides", [1, 1]))
+            pads = attrs.get("pads", [0, 0, 0, 0])
+            p = (pads[0], pads[2]) if len(pads) == 4 else (pads[0], pads[0]) if len(pads) == 2 else pads[:2]
+            self._set(out[0], F.relu(F.conv2d(x, w, b, stride=stride, padding=p)))
             x, w = g(inp[0]), g(inp[1])
             b = g(inp[2]) if len(inp) >= 3 else None
             attrs = self._node_attrs.get(out[0], {})
@@ -274,3 +351,100 @@ class GPUExecutor:
         else:
             # Pass-through
             self._set(out[0], g(inp[0]) if inp else g(out[0]))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Memory-aware executor (C3.4 integration)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class MemoryAwareExecutor(GPUExecutor):
+    """Executor with real memory pooling via lifetime analysis (C3.4 integration)."""
+
+    def execute_plan(self, plan: List[dict], output_names: List[str]) -> Dict[str, np.ndarray]:
+        plan = self._merge_kernels(plan)
+
+        # Build tensor lifetimes with shapes
+        first_use, last_use, tensor_shape = {}, {}, {}
+        weight_input_names = set(self._reg.keys())
+
+        for ki, k in enumerate(plan):
+            for o in k['outputs']:
+                if o not in first_use:
+                    first_use[o] = ki
+                last_use[o] = ki
+                tensor_shape[o] = None  # shape known after first execution
+            for i in k['inputs']:
+                if i in first_use and i not in weight_input_names:
+                    last_use[i] = ki
+
+        intermediates = {n: (first_use[n], last_use[n])
+                         for n in first_use if n not in weight_input_names}
+
+        # Map each intermediate to the OUTPUT tensor it feeds into
+        # (which determines its shape)
+        tensor_src = {}  # intermediate → which kernel's output fills it
+        for ki, k in enumerate(plan):
+            for o in k['outputs']:
+                if o in intermediates:
+                    tensor_src[o] = ki
+
+        # Dynamic buffer pool
+        buf_pool = {}   # buf_idx → torch.Tensor
+        active = {}     # tensor_name → buf_idx
+        buf_free = []   # free buf_idx list
+        next_buf = 0
+
+        # Override _set to pool intermediate tensors
+        orig_set = self._set
+        def pooled_set(name, val):
+            nonlocal next_buf
+            if name not in intermediates:
+                return orig_set(name, val)
+
+            f_use, l_use = intermediates[name]
+
+            # Free expired buffers
+            expired = [n for n, bi in list(active.items())
+                       if last_use.get(n, 0) < f_use]
+            for n in expired:
+                bi = active.pop(n)
+                buf_free.append(bi)
+
+            # Allocate or reuse buffer
+            if buf_free:
+                bi = buf_free.pop(0)
+                buf = buf_pool.get(bi)
+                if buf is None or buf.shape != val.shape:
+                    buf_pool[bi] = val  # new shape
+                else:
+                    buf.copy_(val)  # reuse in-place
+                    val = buf
+            else:
+                bi = next_buf
+                buf_pool[bi] = val
+                next_buf += 1
+
+            active[name] = bi
+
+            return orig_set(name, val)
+
+        self._set = pooled_set
+
+        # Execute kernels
+        for k in plan:
+            self._run(k)
+
+        self._set = orig_set  # restore
+        results = {n: self._reg[n].cpu().numpy() for n in output_names}
+
+        # Report
+        pool_bytes = sum(t.numel() * t.element_size() for t in buf_pool.values())
+        est_without = sum(t.numel() * t.element_size()
+                          for n, t in self._reg.items()
+                          if n in intermediates)
+        import sys
+        print(f"    [memory] {len(intermediates)} tensors → {len(buf_pool)} buffers, "
+              f"pool={pool_bytes/1024**2:.1f}MB (saved {max(0, est_without-pool_bytes)/1024**2:.1f}MB)",
+              file=sys.stderr)
+
+        return results
