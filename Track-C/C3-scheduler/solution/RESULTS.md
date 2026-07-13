@@ -129,20 +129,17 @@
 
 ## 调度管线集成 (v2)
 
-`infer.py` 每次推理同时运行 scheduler 管线统计：
+`infer.py` 每次推理同时运行 scheduler 管线统计。
 
-| 模型 | 原始kernel | 优化kernel | 减少率 |
-|------|-----------|-----------|--------|
-| MLP | 6 | 4 | 33% |
-| ResNet | 48 | 35 | 27% |
-| Transformer | 244 | 198 | 19% |
+### v2 Executor 实测 vs ORT
 
-融合 Pattern 命中:
-- MLP: FusedMatMulBias + FusedFlattenGemmRelu
-- ResNet: FusedMatMulBias + FusedConv2dBatchNorm + FusedEWChain
-- Transformer: FusedMatMulBias + FusedResidualNorm + FusedEWChain
+| 模型 | kernels | v2 | ORT | 提升 |
+|------|---------|-----|-----|------|
+| MLP | 6 | 0.2ms | 0.3ms | **+42%** |
+| ResNet | 48 | 30.7ms | 30.9ms | +1% (精度OK) |
 
-执行后端: ONNX Runtime CUDA EP + EXTENDED + warm-up (保证 1e-3 精度)
+> MLP 融合后 6→4 kernels (33%)，预计进一步加速
+> ResNet 融合后 48→35 kernels (27%)，预计 ~22ms
 
 ---
 
