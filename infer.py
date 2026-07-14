@@ -40,12 +40,18 @@ torch.backends.cuda.matmul.allow_tf32 = True
 # Model type detection
 # ═══════════════════════════════════════════════════════════════════════════
 
+_ONNX_MODEL_CACHE = {}
+
 def detect_model_type(onnx_path: str) -> str:
     """Read ONNX graph operator types and classify model.
 
     Returns one of: 'mlp' | 'resnet' | 'transformer' | 'unknown'
     """
-    model = onnx.load(onnx_path)
+    if onnx_path in _ONNX_MODEL_CACHE:
+        model = _ONNX_MODEL_CACHE[onnx_path]
+    else:
+        model = onnx.load(onnx_path)
+        _ONNX_MODEL_CACHE[onnx_path] = model
     op_types = {node.op_type for node in model.graph.node}
 
     # Transformer: has MatMul AND Softmax (self-attention signature)

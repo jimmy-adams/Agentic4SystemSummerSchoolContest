@@ -416,29 +416,16 @@ def run_fusion(graph) -> dict:
             for f in new_ffg:
                 consumed_in_pass.update(f["nodes_removed"])
 
-        # --- FusedSoftmaxDropout (priority 5) ---
-        #  4. FusedConv2dBatchNorm (pre-fusion, runs once)
-        #  5. FusedEWChain       (everything else: 2–8 EW ops)
-
-        # --- FusedResidualNorm (priority 1) ---
-        frn = _match_residual_norm(nodes, name_to_idx, consumer_map, producer_map)
-        new_frn = [f for f in frn if not set(f["nodes_removed"]) & consumed_in_pass]
-        if new_frn:
+        # --- FusedConvRelu (priority 5) ---
+        fcr = _match_conv_relu(nodes, name_to_idx, consumer_map)
+        new_fcr = [f for f in fcr if not set(f["nodes_removed"]) & consumed_in_pass]
+        if new_fcr:
             changed = True
-            all_fusions.extend(new_frn)
-            for f in new_frn:
+            all_fusions.extend(new_fcr)
+            for f in new_fcr:
                 consumed_in_pass.update(f["nodes_removed"])
 
-        # --- FusedMatMulBias (priority 2) ---
-        fmb = _match_matmul_bias(nodes, name_to_idx, edges, consumer_map)
-        new_fmb = [f for f in fmb if not set(f["nodes_removed"]) & consumed_in_pass]
-        if new_fmb:
-            changed = True
-            all_fusions.extend(new_fmb)
-            for f in new_fmb:
-                consumed_in_pass.update(f["nodes_removed"])
-
-        # --- FusedSoftmaxDropout (priority 3) ---
+        # --- FusedSoftmaxDropout (priority 6) ---
         fsd = _match_softmax_dropout(nodes, name_to_idx, consumer_map)
         new_fsd = [f for f in fsd if not set(f["nodes_removed"]) & consumed_in_pass]
         if new_fsd:

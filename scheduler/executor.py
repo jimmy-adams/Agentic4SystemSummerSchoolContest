@@ -328,18 +328,6 @@ class GPUExecutor:
             pads = attrs.get("pads", [0, 0, 0, 0])
             p = (pads[0], pads[2]) if len(pads) == 4 else (pads[0], pads[0]) if len(pads) == 2 else pads[:2]
             self._set(out[0], F.relu(F.conv2d(x, w, b, stride=stride, padding=p)))
-            x, w = g(inp[0]), g(inp[1])
-            b = g(inp[2]) if len(inp) >= 3 else None
-            attrs = self._node_attrs.get(out[0], {})
-            stride = tuple(attrs.get("strides", [1, 1]))
-            pads = attrs.get("pads", [0, 0, 0, 0])
-            if len(pads) == 4:
-                p = (pads[0], pads[2])
-            elif len(pads) == 2:
-                p = (pads[0], pads[0])
-            else:
-                p = (pads[0], pads[1])
-            self._set(out[0], F.conv2d(x, w, b, stride=stride, padding=p))
 
         elif name == "FusedResidualNorm":
             # skip-Add → LayerNorm: inp = [X, skip, scale, bias?]

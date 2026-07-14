@@ -13,6 +13,7 @@ exist and are wired into the execution plan, points are awarded.
 """
 
 from dataclasses import dataclass, field
+import bisect
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -64,8 +65,7 @@ class DeviceMemoryPool:
         if handle not in self.allocations:
             return
         offset, size = self.allocations.pop(handle)
-        self.free_list.append((offset, size))
-        self.free_list.sort()  # keep sorted for coalesce
+        bisect.insort(self.free_list, (offset, size))  # keep sorted for coalesce
         # Coalesce adjacent blocks (C.2)
         i = 0
         while i < len(self.free_list) - 1:
