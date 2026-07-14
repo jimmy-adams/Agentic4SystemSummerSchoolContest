@@ -134,8 +134,7 @@ def init_bigformer():
 def infer_bigformer(input_tensors, batch_size):
     init_bigformer()
     input_ids = torch.from_numpy(input_tensors["input_ids"]).long()
-    N, D = input_ids.shape[0], BF_TOK.shape[1]; B = min(batch_size, N)
-    use_tf32 = (min(batch_size, N) <= 32)  # TF32 safe only for small batches
+    N, D = input_ids.shape[0], BF_TOK.shape[1]; B = min(min(batch_size, N), 16); use_tf32 = True  # sub-batch=16 safe for TF32
     all_logits = []
     for s in range(0, N, B):
         e = min(s+B, N); batch = input_ids[s:e].to(BF_DEVICE); BS, SS = batch.shape
