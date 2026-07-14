@@ -140,26 +140,35 @@ def infer_bigformer(input_tensors, batch_size):
         e = min(s+B, N); batch = input_ids[s:e].to(BF_DEVICE); BS, SS = batch.shape
         x = BF_TOK[batch] + BF_POS[:, :SS, :]
         for w in BF_BLOCKS:
+            # ── Convert FP16→FP32 ONCE per block, reuse ──
+            w_qkv = w["qkv"].float(); w_proj = w["proj"].float()
+            w_ff1 = w["ff1"].float(); w_ff2 = w["ff2"].float()
+            
             residual = x.float()
             if w["ln1_w"] is not None:
                 x = F.layer_norm(x.float(), [D], weight=w["ln1_w"].float(), bias=w["ln1_b"].float() if w["ln1_b"] is not None else None, eps=1e-5)
-            qkv = x @ w["qkv"].float()
+            
+            qkv = x @ w_qkv
             if w["qkv_b"] is not None: qkv = qkv + w["qkv_b"].float()
             q,k,v = qkv.chunk(3,dim=-1); q=q.view(BS,SS,32,128).permute(0,2,1,3); k=k.view(BS,SS,32,128).permute(0,2,1,3); v=v.view(BS,SS,32,128).permute(0,2,1,3)
             attn_out = (F.softmax((q@k.transpose(-2,-1))*(128**-0.5),dim=-1)@v).permute(0,2,1,3).reshape(BS,SS,4096)
-            attn_out = attn_out @ w["proj"].float()
+            attn_out = attn_out @ w_proj
             if w["proj_b"] is not None: attn_out = attn_out + w["proj_b"].float()
             x = residual + attn_out
+            
             residual = x.float()
             if w["ln2_w"] is not None:
                 x = F.layer_norm(x.float(),[D],weight=w["ln2_w"].float(),bias=w["ln2_b"].float() if w["ln2_b"] is not None else None,eps=1e-5)
+            
             torch.backends.cuda.matmul.allow_tf32 = True
-            x = x @ w["ff1"].float(); 
+            x = x @ w_ff1
             if w["ff1_b"] is not None: x = x + w["ff1_b"].float()
-            x = F.gelu(x); x = x @ w["ff2"].float()
+            x = F.gelu(x); x = x @ w_ff2
             if w["ff2_b"] is not None: x = x + w["ff2_b"].float()
             torch.backends.cuda.matmul.allow_tf32 = False
             x = residual + x
+            
+            del w_qkv, w_proj, w_ff1, w_ff2
         if BF_LNF_W is not None: x = F.layer_norm(x.float(),[D],weight=BF_LNF_W,bias=BF_LNF_B,eps=1e-5)
         if BF_HEAD_W is not None: x = x.float() @ BF_HEAD_W.float() + (BF_HEAD_B if BF_HEAD_B is not None else 0)
         all_logits.append(x.cpu().numpy())
