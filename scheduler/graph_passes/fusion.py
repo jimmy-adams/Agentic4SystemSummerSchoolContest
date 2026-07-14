@@ -233,15 +233,49 @@ def _match_flatten_gemm_relu(nodes: List[dict], name_to_idx: Dict[str, int],
                     for c2 in consumer_map.get(gemm_out, []):
                         relu_node = nodes[name_to_idx[c2]]
                         if relu_node["op_type"] == "Relu":
+                            # Compute external inputs: union of all chain inputs
+                            # minus tensors produced inside the chain
+                            chain = [n, gemm_node, relu_node]
+                            internal = set()
+                            for cn in chain:
+                                internal.update(cn["outputs"])
+                            all_inputs = []
+                            for cn in chain:
+                                for i in cn["inputs"]:
+                                    if i not in internal and i not in all_inputs:
+                                        all_inputs.append(i)
                             fusions.append({
                                 "pattern": "FusedFlattenGemmRelu",
                                 "fused_op": "FusedFlattenGemmRelu",
                                 "original": [n["name"], gemm_node["name"], relu_node["name"]],
                                 "new_name": f"{n['name']}_fused_gemm_relu",
-                                "inputs": n["inputs"],
+                                "inputs": all_inputs,
                                 "outputs": relu_node["outputs"],
                                 "nodes_removed": [n["name"], gemm_node["name"], relu_node["name"]],
                             })
+    return fusions
+
+
+def _match_conv_relu(nodes: List[dict], name_to_idx: Dict[str, int],
+                      consumer_map: Dict[str, List[str]]) -> List[dict]:
+    """Match: Conv → Relu (bonus pattern for ResNet)."""
+    fusions = []
+    for n in nodes:
+        if n["op_type"] != "Conv":
+            continue
+        for out_t in n["outputs"]:
+            for c in consumer_map.get(out_t, []):
+                cn = nodes[name_to_idx[c]]
+                if cn["op_type"] == "Relu":
+                    fusions.append({
+                        "pattern": "FusedConvRelu",
+                        "fused_op": "FusedConvRelu",
+                        "original": [n["name"], cn["name"]],
+                        "new_name": f"{n['name']}_fused_relu",
+                        "inputs": n["inputs"],
+                        "outputs": cn["outputs"],
+                        "nodes_removed": [n["name"], cn["name"]],
+                    })
     return fusions
 
 
@@ -337,7 +371,7 @@ def run_fusion(graph) -> dict:
         #  5. FusedGemmRelu       (Gemm→Relu)
         #  6. FusedSoftmaxDropout (Softmax→Dropout)
         #  7. FusedConv2dBatchNorm (pre-fusion)
-        #  8. FusedEWChain        (elementwise chain)
+        #  8. FusedConvRelu      (Conv → Relu — bonus, ResNet)
 
         # --- FusedFlattenGemmRelu (priority 1) ---
         ffg3 = _match_flatten_gemm_relu(nodes, name_to_idx, consumer_map)

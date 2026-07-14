@@ -48,7 +48,7 @@ def decompose(node: dict, graph, precision: str) -> List[KernelSpecRef]:
     inter_idx = [0]  # mutable counter for intermediate tensor names
 
     def _inter(prefix: str = "tmp") -> str:
-        t = f"__c3_inter_{inter_idx[0]}__"
+        t = f"__c3_inter_{prefix}_{inter_idx[0]}__"
         inter_idx[0] += 1
         return t
 
@@ -91,11 +91,7 @@ def decompose(node: dict, graph, precision: str) -> List[KernelSpecRef]:
 
     # ─── GlobalAveragePool ────────────────────────────────────────────────
     if op == "GlobalAveragePool":
-        t1 = _inter("gap_reduce")
-        return [
-            KernelSpecRef(name="reduce_mean_2d", inputs=list(inp), outputs=[t1], op_type=op),
-            KernelSpecRef(name="reshape", inputs=[t1], outputs=list(out), op_type=op),
-        ]
+        return [KernelSpecRef(name="global_avg_pool", inputs=list(inp), outputs=list(out), op_type=op)]
 
     # ─── Softmax (must decompose to FP32 regardless) ─────────────────────
     if op == "Softmax":
