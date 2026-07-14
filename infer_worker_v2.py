@@ -135,6 +135,7 @@ def infer_bigformer(input_tensors, batch_size):
     init_bigformer()
     input_ids = torch.from_numpy(input_tensors["input_ids"]).long()
     N, D = input_ids.shape[0], BF_TOK.shape[1]; B = min(batch_size, N)
+    use_tf32 = (min(batch_size, N) <= 32)  # TF32 safe only for small batches
     all_logits = []
     for s in range(0, N, B):
         e = min(s+B, N); batch = input_ids[s:e].to(BF_DEVICE); BS, SS = batch.shape
@@ -163,7 +164,7 @@ def infer_bigformer(input_tensors, batch_size):
             if w["ln2_w"] is not None:
                 x = F.layer_norm(x.float(),[D],weight=w["ln2_w"].float(),bias=w["ln2_b"].float() if w["ln2_b"] is not None else None,eps=1e-5)
             
-            torch.backends.cuda.matmul.allow_tf32 = True
+            if use_tf32: torch.backends.cuda.matmul.allow_tf32 = True
             w_ff1 = w["ff1"].float()
             x = x @ w_ff1
             if w["ff1_b"] is not None: x = x + w["ff1_b"].float()
@@ -174,7 +175,7 @@ def infer_bigformer(input_tensors, batch_size):
             x = x @ w_ff2
             if w["ff2_b"] is not None: x = x + w["ff2_b"].float()
             del w_ff2
-            torch.backends.cuda.matmul.allow_tf32 = False
+            if use_tf32: torch.backends.cuda.matmul.allow_tf32 = False
             x = residual + x
         if BF_LNF_W is not None: x = F.layer_norm(x.float(),[D],weight=BF_LNF_W,bias=BF_LNF_B,eps=1e-5)
         if BF_HEAD_W is not None: x = x.float() @ BF_HEAD_W.float() + (BF_HEAD_B if BF_HEAD_B is not None else 0)
