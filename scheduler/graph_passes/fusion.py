@@ -121,6 +121,7 @@ def _match_ew_chain(nodes: List[dict], name_to_idx: Dict[str, int],
                 "inputs": all_inputs,
                 "outputs": final_outputs,
                 "nodes_removed": [o["name"] for o in chain],
+                "op_chain": [o["op_type"] for o in chain],
             })
     return fusions
 

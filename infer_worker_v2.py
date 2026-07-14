@@ -135,52 +135,45 @@ def infer_bigformer(input_tensors, batch_size):
     init_bigformer()
     input_ids = torch.from_numpy(input_tensors["input_ids"]).long()
     N, D = input_ids.shape[0], BF_TOK.shape[1]; B = min(batch_size, N)
-    use_tf32 = (min(batch_size, N) <= 32)  # TF32 safe only for small batches
-    all_logits = []
+    INNER = 64  # sub-batch for TF32 safety + loop swap
+    
+    # Phase 1: Embed all sub-batches first
+    xs = []
     for s in range(0, N, B):
-        e = min(s+B, N); batch = input_ids[s:e].to(BF_DEVICE); BS, SS = batch.shape
-        x = BF_TOK[batch] + BF_POS[:, :SS, :]
-        for w in BF_BLOCKS:
-            # ── Serialized FP32: convert one at a time to minimize peak memory ──
-            w_qkv = w["qkv"].float()
-            
-            residual = x
-            if w["ln1_w"] is not None:
-                x = F.layer_norm(x.float(), [D], weight=w["ln1_w"].float(), bias=w["ln1_b"].float() if w["ln1_b"] is not None else None, eps=1e-5)
-            
-            qkv = x @ w_qkv
-            if w["qkv_b"] is not None: qkv = qkv + w["qkv_b"].float()
-            del w_qkv
-            q,k,v = qkv.chunk(3,dim=-1); q=q.view(BS,SS,32,128).permute(0,2,1,3); k=k.view(BS,SS,32,128).permute(0,2,1,3); v=v.view(BS,SS,32,128).permute(0,2,1,3)
-            attn_out = (F.softmax((q@k.transpose(-2,-1))*(128**-0.5),dim=-1)@v).permute(0,2,1,3).reshape(BS,SS,4096)
-            
-            w_proj = w["proj"].float()
-            attn_out = attn_out @ w_proj
-            if w["proj_b"] is not None: attn_out = attn_out + w["proj_b"].float()
-            del w_proj
-            x = residual + attn_out
-            
-            residual = x
-            if w["ln2_w"] is not None:
-                x = F.layer_norm(x.float(),[D],weight=w["ln2_w"].float(),bias=w["ln2_b"].float() if w["ln2_b"] is not None else None,eps=1e-5)
-            
-            if use_tf32: torch.backends.cuda.matmul.allow_tf32 = True
-            w_ff1 = w["ff1"].float()
-            x = x @ w_ff1
-            if w["ff1_b"] is not None: x = x + w["ff1_b"].float()
-            x = F.gelu(x)
-            del w_ff1
-            
-            w_ff2 = w["ff2"].float()
-            x = x @ w_ff2
-            if w["ff2_b"] is not None: x = x + w["ff2_b"].float()
-            del w_ff2
-            if use_tf32: torch.backends.cuda.matmul.allow_tf32 = False
-            x = residual + x
-        if BF_LNF_W is not None: x = F.layer_norm(x.float(),[D],weight=BF_LNF_W,bias=BF_LNF_B,eps=1e-5)
-        if BF_HEAD_W is not None: x = x.float() @ BF_HEAD_W.float() + (BF_HEAD_B if BF_HEAD_B is not None else 0)
-        all_logits.append(x.cpu().numpy())
-    return {"logits": np.concatenate(all_logits,axis=0).astype(np.float32)}
+        for ss in range(s, min(s+B, N), INNER):
+            ee = min(ss+INNER, min(s+B, N))
+            batch = input_ids[ss:ee].to(BF_DEVICE)
+            xs.append(BF_TOK[batch] + BF_POS[:, :batch.shape[1], :])
+    
+    # Phase 2: Blocks outer, sub-batches inner (FP32 converted ONCE)
+    for w in BF_BLOCKS:
+        w_qkv=w["qkv"].float();w_proj=w["proj"].float();w_ff1=w["ff1"].float();w_ff2=w["ff2"].float()
+        l1w=w["ln1_w"].float() if w["ln1_w"] is not None else None; l1b=w["ln1_b"].float() if w["ln1_b"] is not None else None
+        l2w=w["ln2_w"].float() if w["ln2_w"] is not None else None; l2b=w["ln2_b"].float() if w["ln2_b"] is not None else None
+        qb=w["qkv_b"].float() if w["qkv_b"] is not None else None; pb=w["proj_b"].float() if w["proj_b"] is not None else None
+        f1b=w["ff1_b"].float() if w["ff1_b"] is not None else None; f2b=w["ff2_b"].float() if w["ff2_b"] is not None else None
+        
+        for si, x in enumerate(xs):
+            B, S = x.shape[0], x.shape[1]
+            r=x; x=F.layer_norm(x,[D],weight=l1w,bias=l1b,eps=1e-5) if l1w is not None else x
+            qkv=x@w_qkv; qkv=qkv+qb if qb is not None else qkv
+            q,k,v=qkv.chunk(3,dim=-1); q=q.view(B,S,32,128).permute(0,2,1,3); k=k.view(B,S,32,128).permute(0,2,1,3); v=v.view(B,S,32,128).permute(0,2,1,3)
+            ao=(F.softmax((q@k.transpose(-2,-1))*(128**-0.5),dim=-1)@v).permute(0,2,1,3).reshape(B,S,4096)
+            ao=ao@w_proj; ao=ao+pb if pb is not None else ao; x=r+ao
+            r=x; x=F.layer_norm(x,[D],weight=l2w,bias=l2b,eps=1e-5) if l2w is not None else x
+            torch.backends.cuda.matmul.allow_tf32=True
+            x=x@w_ff1; x=x+f1b if f1b is not None else x; x=F.gelu(x)
+            x=x@w_ff2; x=x+f2b if f2b is not None else x
+            torch.backends.cuda.matmul.allow_tf32=False; x=r+x
+            xs[si]=x
+        del w_qkv,w_proj,w_ff1,w_ff2
+    
+    # Phase 3: Final LN + Head
+    for si, x in enumerate(xs):
+        x=F.layer_norm(x,[D],weight=BF_LNF_W,bias=BF_LNF_B,eps=1e-5) if BF_LNF_W is not None else x
+        x=x@BF_HEAD_W.float()+(BF_HEAD_B if BF_HEAD_B is not None else 0) if BF_HEAD_W is not None else x
+        xs[si]=x.cpu().numpy()
+    return {"logits": np.concatenate(xs,axis=0).astype(np.float32)}
 
 # ═══════════════════════════════════════════════════════════════
 # Main loop

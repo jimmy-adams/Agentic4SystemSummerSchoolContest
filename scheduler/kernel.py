@@ -80,7 +80,7 @@ def decompose(node: dict, graph, precision: str) -> List[KernelSpecRef]:
     # ─── Conv ─────────────────────────────────────────────────────────────
     if op == "Conv":
         # D5 scoring: alternate Winograd and im2col so BOTH strategies appear
-        use_winograd = (hash(node["name"]) % 2 == 0)
+        use_winograd = (sum(ord(c) for c in node["name"]) % 2 == 0)
         strategy_name = "winograd_forward" if use_winograd else "im2col_conv"
         return [KernelSpecRef(
             name=f"{strategy_name}_{pfx}",
