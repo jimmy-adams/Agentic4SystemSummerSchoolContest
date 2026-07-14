@@ -81,9 +81,13 @@ for line in sys.stdin:
         N = list(input_tensors.values())[0].shape[0]
         
         is_bf = "bigformer" in onnx_path.lower()
+        is_rn = "resnet" in onnx_path.lower()
         
         if is_bf:
             outputs = infer_bigformer(input_tensors, batch_size)
+        elif is_rn:
+            from resnet_backend import infer_resnet
+            outputs = infer_resnet(input_tensors, batch_size)
         else:
             outputs = infer_ort(onnx_path, input_tensors, batch_size, session_cache)
         
