@@ -51,5 +51,5 @@ def infer_resnet(input_tensors, batch_size):
                     if i_name in rem and i_name in reg:
                         rem[i_name]-=1
                         if rem[i_name]<=0 and i_name!=_INPUT_NAME:del reg[i_name]
-        ao.append(reg[_OUTPUT_NAME][:actual].cpu().numpy());del reg;gc.collect();torch.cuda.empty_cache()
+        ao.append(reg[_OUTPUT_NAME][:actual].cpu().numpy());del reg
     return {"logits":np.concatenate(ao,axis=0).astype(np.float32)}
